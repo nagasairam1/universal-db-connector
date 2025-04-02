@@ -1,0 +1,84 @@
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import create_engine, text
+from pymongo import MongoClient
+import sqlite3
+
+app = FastAPI()
+
+# Database connections
+connections = {}
+
+def connect_mysql(host, user, password, db):
+    url = f"mysql+pymysql://{user}:{password}@{host}/{db}"
+    return create_engine(url).connect()
+
+def connect_postgresql(host, user, password, db):
+    url = f"postgresql://{user}:{password}@{host}/{db}"
+    return create_engine(url).connect()
+
+def connect_mongodb(uri):
+    return MongoClient(uri)
+
+def connect_sqlite(db_name):
+    return sqlite3.connect(db_name)
+
+class ConnectRequest(BaseModel):
+    db_type: str
+    host: str = None
+    user: str = None
+    password: str = None
+    db_name: str = None
+    uri: str = None
+
+@app.post("/connect")
+def connect_db(request: ConnectRequest):
+    global connections
+    try:
+        if request.db_type == "mysql":
+            conn = connect_mysql(request.host, request.user, request.password, request.db_name)
+        elif request.db_type == "postgresql":
+            conn = connect_postgresql(request.host, request.user, request.password, request.db_name)
+        elif request.db_type == "mongodb":
+            conn = connect_mongodb(request.uri)
+        elif request.db_type == "sqlite":
+            conn = connect_sqlite(request.db_name)
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported database type")
+        
+        connections[request.db_name] = conn
+        return {"message": "Connected successfully", "db_name": request.db_name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class QueryRequest(BaseModel):
+    db_name: str
+    query: str
+
+@app.post("/query")
+def execute_query(request: QueryRequest):
+    if request.db_name not in connections:
+        raise HTTPException(status_code=400, detail="Database not connected")
+    
+    conn = connections[request.db_name]
+    try:
+        if isinstance(conn, MongoClient):
+            raise HTTPException(status_code=400, detail="MongoDB queries not supported via SQL")
+        
+        result = conn.execute(text(request.query))
+        return {"data": [dict(row) for row in result]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/disconnect")
+def disconnect_db(db_name: str):
+    if db_name in connections:
+        connections[db_name].close()
+        del connections[db_name]
+        return {"message": "Disconnected successfully"}
+    else:
+        raise HTTPException(status_code=400, detail="Database not connected")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
